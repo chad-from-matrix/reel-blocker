@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">Reel Blocker</string>
-    <string name="service_desc">Watches only Instagram and YouTube. When Reels or Shorts open, it presses Back for you. Nothing is collected or sent anywhere; the app has no internet permission.</string>
+    <string name="service_desc">Blocks Instagram Reels, YouTube Shorts and Facebook Reels, and leaves any app or website showing adult content. It reads screen text only to detect these. Nothing is saved or sent anywhere; the app has no internet permission.</string>
 </resources>
