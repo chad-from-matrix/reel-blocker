@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- No policies: this app can't lock, wipe or control the phone. It only blocks quick uninstall. -->
+<device-admin>
+    <uses-policies />
+</device-admin>

@@ -2,4 +2,5 @@
 <resources>
     <string name="app_name">Reel Blocker</string>
     <string name="service_desc">Blocks Instagram Reels, YouTube Shorts and Facebook Reels, and leaves any app or website showing adult content. It reads screen text only to detect these. Nothing is saved or sent anywhere; the app has no internet permission.</string>
+    <string name="admin_desc">Stops Reel Blocker from being uninstalled quickly. It cannot lock, wipe or control your phone.</string>
 </resources>

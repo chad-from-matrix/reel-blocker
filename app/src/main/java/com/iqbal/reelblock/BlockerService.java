@@ -74,6 +74,31 @@ public class BlockerService extends AccessibilityService {
         ADULT_WATCH.add("com.instagram.lite");
     }
 
+    // System screens where the app could be uninstalled, stopped or switched off.
+    static final Set<String> SYSTEM_PKGS = new HashSet<>();
+    static {
+        SYSTEM_PKGS.add("com.android.settings");
+        SYSTEM_PKGS.add("com.google.android.packageinstaller");
+        SYSTEM_PKGS.add("com.android.packageinstaller");
+        SYSTEM_PKGS.add("com.samsung.android.packageinstaller");
+        SYSTEM_PKGS.add("com.google.android.permissioncontroller");
+        SYSTEM_PKGS.add("com.android.permissioncontroller");
+        SYSTEM_PKGS.add("com.oplus.safecenter");
+        SYSTEM_PKGS.add("com.coloros.safecenter");
+        SYSTEM_PKGS.add("com.oplus.securitypermission");
+        SYSTEM_PKGS.add("com.miui.securitycenter");
+        SYSTEM_PKGS.add("com.samsung.android.lool");
+        SYSTEM_PKGS.add("com.google.android.apps.wellbeing");
+        SYSTEM_PKGS.add("com.android.vending");
+    }
+
+    // Words that mean someone is trying to remove or disable the app.
+    private static final String[] TAMPER_WORDS = {
+            "uninstall", "force stop", "deactivate", "use reel blocker", "stop reel blocker",
+            "turn off reel blocker", "clear data", "clear storage", "disable",
+            "blocks instagram reels"
+    };
+
     private static final int MAX_NODES = 1200;
 
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -85,6 +110,12 @@ public class BlockerService extends AccessibilityService {
         if (event == null || event.getPackageName() == null) return;
         String pkg = event.getPackageName().toString();
         if (pkg.equals(getPackageName())) return;
+
+        // Uninstall protection: guard Settings / uninstall screens for this app.
+        if (SYSTEM_PKGS.contains(pkg)) {
+            if (Prefs.isProtected(this) && !Prefs.isUnlocked(this)) guardSystemScreen(event, pkg);
+            return;
+        }
 
         SharedPreferences p = Prefs.get(this);
         // Adult blocking only runs in browsers and social media apps.
@@ -165,6 +196,65 @@ public class BlockerService extends AccessibilityService {
             }
         }
         return false;
+    }
+
+    private long lastGuardCheck = 0;
+
+    private void guardSystemScreen(AccessibilityEvent event, String pkg) {
+        long now = SystemClock.elapsedRealtime();
+        if (event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                && now - lastGuardCheck < 300) return;
+        lastGuardCheck = now;
+
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root == null || root.getPackageName() == null
+                || !pkg.equals(root.getPackageName().toString())) return;
+
+        String text = collectText(root);
+        if (!text.contains("reel blocker") && !text.contains("blocks instagram reels")) return;
+        for (String w : TAMPER_WORDS) {
+            if (text.contains(w)) {
+                blockTamper(now);
+                return;
+            }
+        }
+    }
+
+    private String collectText(AccessibilityNodeInfo root) {
+        StringBuilder sb = new StringBuilder();
+        ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
+        queue.add(root);
+        int seen = 0;
+        while (!queue.isEmpty() && seen < MAX_NODES) {
+            AccessibilityNodeInfo n = queue.poll();
+            if (n == null) continue;
+            seen++;
+            if (n.getText() != null) sb.append(n.getText()).append(' ');
+            if (n.getContentDescription() != null) sb.append(n.getContentDescription()).append(' ');
+            int c = n.getChildCount();
+            for (int i = 0; i < c; i++) {
+                AccessibilityNodeInfo child = n.getChild(i);
+                if (child != null) queue.add(child);
+            }
+        }
+        return sb.toString().toLowerCase(java.util.Locale.ROOT);
+    }
+
+    private void blockTamper(long now) {
+        if (now - lastBlock < 1000) return;
+        lastBlock = now;
+        performGlobalAction(GLOBAL_ACTION_BACK);
+        main.postDelayed(() -> {
+            performGlobalAction(GLOBAL_ACTION_HOME);
+            try {
+                Intent i = new Intent(this, PasswordActivity.class);
+                i.putExtra(PasswordActivity.EXTRA_MODE, PasswordActivity.MODE_UNLOCK);
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+                startActivity(i);
+            } catch (Exception e) {
+                Toast.makeText(this, "Reel Blocker is protected", Toast.LENGTH_SHORT).show();
+            }
+        }, 200);
     }
 
     private void blockReel(String pkg, long now) {
