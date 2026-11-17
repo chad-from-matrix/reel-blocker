@@ -92,6 +92,26 @@ public class BlockerService extends AccessibilityService {
         SYSTEM_PKGS.add("com.android.vending");
     }
 
+    // Home screen / app drawer apps (long-press → Uninstall).
+    static final Set<String> LAUNCHERS = new HashSet<>();
+    static {
+        LAUNCHERS.add("com.android.launcher");
+        LAUNCHERS.add("com.android.launcher3");
+        LAUNCHERS.add("net.oneplus.launcher");
+        LAUNCHERS.add("com.oppo.launcher");
+        LAUNCHERS.add("com.oplus.launcher");
+        LAUNCHERS.add("com.sec.android.app.launcher");
+        LAUNCHERS.add("com.miui.home");
+        LAUNCHERS.add("com.mi.android.globallauncher");
+        LAUNCHERS.add("com.google.android.apps.nexuslauncher");
+        LAUNCHERS.add("com.vivo.launcher");
+        LAUNCHERS.add("com.bbk.launcher2");
+        LAUNCHERS.add("com.realme.launcher");
+        LAUNCHERS.add("com.teslacoilsw.launcher");
+        LAUNCHERS.add("app.lawnchair");
+        LAUNCHERS.add("com.microsoft.launcher");
+    }
+
     // Words that mean someone is trying to remove or disable the app.
     private static final String[] TAMPER_WORDS = {
             "uninstall", "force stop", "deactivate", "use reel blocker", "stop reel blocker",
@@ -114,6 +134,10 @@ public class BlockerService extends AccessibilityService {
         // Uninstall protection: guard Settings / uninstall screens for this app.
         if (SYSTEM_PKGS.contains(pkg)) {
             if (Prefs.isProtected(this) && !Prefs.isUnlocked(this)) guardSystemScreen(event, pkg);
+            return;
+        }
+        if (LAUNCHERS.contains(pkg) || pkg.contains("launcher")) {
+            if (Prefs.isProtected(this) && !Prefs.isUnlocked(this)) guardLauncher(event);
             return;
         }
 
@@ -218,6 +242,32 @@ public class BlockerService extends AccessibilityService {
                 return;
             }
         }
+    }
+
+    /** Catches the home screen's own "Uninstall Reel Blocker?" pop-up and its long-press menu. */
+    private void guardLauncher(AccessibilityEvent event) {
+        long now = SystemClock.elapsedRealtime();
+        int type = event.getEventType();
+        if (type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && now - lastGuardCheck < 250)
+            return;
+        lastGuardCheck = now;
+
+        // Event text often carries the pop-up title directly.
+        StringBuilder sb = new StringBuilder();
+        if (event.getText() != null) for (CharSequence t : event.getText()) sb.append(t).append(' ');
+        if (event.getContentDescription() != null) sb.append(event.getContentDescription());
+        String evText = sb.toString().toLowerCase(java.util.Locale.ROOT);
+
+        String text = evText;
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root != null) text = text + " " + collectText(root);
+
+        if (!text.contains("reel blocker") || !text.contains("uninstall")) return;
+        // Only the confirmation pop-up or the long-press menu, not the plain home screen.
+        boolean confirmDialog = text.contains("cancel") || text.contains("uninstall reel blocker")
+                || text.contains("want to uninstall");
+        boolean shortcutMenu = text.contains("app info") || text.contains("widgets");
+        if (confirmDialog || shortcutMenu) blockTamper(now);
     }
 
     private String collectText(AccessibilityNodeInfo root) {

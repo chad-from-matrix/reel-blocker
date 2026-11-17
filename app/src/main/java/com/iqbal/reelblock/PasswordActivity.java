@@ -98,7 +98,21 @@ public class PasswordActivity extends Activity {
                     return;
                 }
                 Prefs.setPassword(this, a);
-                toast("Protection is ON");
+                // Give 10 minutes so the uninstall lock can be switched on right now.
+                Prefs.unlockFor10Min(this);
+                toast("Protection is ON. Now tap Activate on the next screen.");
+                android.app.admin.DevicePolicyManager dpm =
+                        (android.app.admin.DevicePolicyManager) getSystemService(DEVICE_POLICY_SERVICE);
+                android.content.ComponentName admin =
+                        new android.content.ComponentName(this, AdminReceiver.class);
+                if (dpm != null && !dpm.isAdminActive(admin)) {
+                    android.content.Intent i = new android.content.Intent(
+                            android.app.admin.DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN);
+                    i.putExtra(android.app.admin.DevicePolicyManager.EXTRA_DEVICE_ADMIN, admin);
+                    i.putExtra(android.app.admin.DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                            "Stops Reel Blocker from being uninstalled from anywhere.");
+                    startActivity(i);
+                }
                 finish();
             } else {
                 if (Prefs.checkPassword(this, a)) {

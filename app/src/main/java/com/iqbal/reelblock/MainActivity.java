@@ -171,7 +171,8 @@ public class MainActivity extends Activity {
             lockBtn.setText("Unlock with password");
             lockNowBtn.setVisibility(android.view.View.GONE);
         } else {
-            lockStatus.setText("🔓 Unlocked for a few minutes. You can change settings now.");
+            lockStatus.setText("🔓 Unlocked for a few minutes. You can change settings now. "
+                    + "Tap \"Lock again now\" when you're done.");
             lockBtn.setText("Remove protection completely");
             lockNowBtn.setVisibility(android.view.View.VISIBLE);
         }
