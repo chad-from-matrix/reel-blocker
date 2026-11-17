@@ -131,15 +131,13 @@ public class BlockerService extends AccessibilityService {
         String pkg = event.getPackageName().toString();
         if (pkg.equals(getPackageName())) return;
 
-        // Uninstall protection: guard Settings / uninstall screens for this app.
-        if (SYSTEM_PKGS.contains(pkg)) {
-            if (Prefs.isProtected(this) && !Prefs.isUnlocked(this)) guardSystemScreen(event, pkg);
-            return;
+        // Uninstall protection: watches every app (Settings, launcher, app search,
+        // OnePlus/Samsung/Xiaomi pop-ups...) for screens that would remove this app.
+        if (Prefs.isProtected(this) && !Prefs.isUnlocked(this)
+                && !"com.anthropic.claude".equals(pkg)) {
+            if (guardAny(event, pkg)) return;
         }
-        if (LAUNCHERS.contains(pkg) || pkg.contains("launcher")) {
-            if (Prefs.isProtected(this) && !Prefs.isUnlocked(this)) guardLauncher(event);
-            return;
-        }
+        if (SYSTEM_PKGS.contains(pkg)) return;
 
         SharedPreferences p = Prefs.get(this);
         // Adult blocking only runs in browsers and social media apps.
@@ -223,6 +221,48 @@ public class BlockerService extends AccessibilityService {
     }
 
     private long lastGuardCheck = 0;
+
+    /** Returns true if it blocked a tamper attempt. */
+    private boolean guardAny(AccessibilityEvent event, String pkg) {
+        int type = event.getEventType();
+        if (type == AccessibilityEvent.TYPE_VIEW_SCROLLED) return false;
+        long now = SystemClock.elapsedRealtime();
+        if (type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && now - lastGuardCheck < 300)
+            return false;
+        lastGuardCheck = now;
+
+        StringBuilder sb = new StringBuilder();
+        if (event.getText() != null) for (CharSequence t : event.getText()) sb.append(t).append(' ');
+        if (event.getContentDescription() != null) sb.append(event.getContentDescription()).append(' ');
+        // Read every window on screen (pop-ups are often separate windows).
+        try {
+            List<android.view.accessibility.AccessibilityWindowInfo> wins = getWindows();
+            if (wins != null) {
+                for (android.view.accessibility.AccessibilityWindowInfo w : wins) {
+                    if (w.getType() == android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM
+                            && w.getRoot() == null) continue;
+                    AccessibilityNodeInfo r = w.getRoot();
+                    if (r != null) sb.append(collectText(r)).append(' ');
+                }
+            }
+        } catch (Exception ignored) { }
+        AccessibilityNodeInfo root = getRootInActiveWindow();
+        if (root != null) sb.append(collectText(root));
+        String text = sb.toString().toLowerCase(java.util.Locale.ROOT);
+
+        if (!text.contains("reel blocker") && !text.contains("blocks instagram reels")) return false;
+
+        boolean tamper = false;
+        if (SYSTEM_PKGS.contains(pkg)) {
+            for (String w : TAMPER_WORDS) if (text.contains(w)) { tamper = true; break; }
+        } else if (text.contains("uninstall")) {
+            // Launcher / app search: the confirm pop-up or the long-press menu.
+            tamper = text.contains("cancel") || text.contains("app info")
+                    || text.contains("want to uninstall") || text.contains("delete its data");
+        }
+        if (tamper) blockTamper(now);
+        return tamper;
+    }
 
     private void guardSystemScreen(AccessibilityEvent event, String pkg) {
         long now = SystemClock.elapsedRealtime();
