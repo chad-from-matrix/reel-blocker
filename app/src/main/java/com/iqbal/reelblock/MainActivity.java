@@ -56,8 +56,9 @@ public class MainActivity extends Activity {
 
         box.addView(heading("Adult content"));
         box.addView(toggle("Block adult content everywhere", Prefs.ADULT_ON));
-        box.addView(note("Leaves any app or website (Chrome and other browsers, Instagram, "
-                + "Facebook, YouTube and more) when adult websites, searches or words appear."));
+        box.addView(note("Works in Chrome and other browsers, Instagram, Facebook, YouTube "
+                + "and other social media apps. Other apps (Claude, Quran apps, WhatsApp, etc.) "
+                + "are never blocked."));
 
         box.addView(heading("Extra protection (recommended)"));
         box.addView(note("Blocks adult websites for the whole phone, even in apps this blocker "

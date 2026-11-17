@@ -1,6 +1,7 @@
 package com.iqbal.reelblock;
 
 import android.accessibilityservice.AccessibilityService;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Handler;
 import android.os.Looper;
@@ -37,24 +38,40 @@ public class BlockerService extends AccessibilityService {
             "video_home_reels_container"
     };
 
-    static final Set<String> BROWSERS = new HashSet<>();
+    // Apps where adult content is blocked: browsers + social media only.
+    static final Set<String> ADULT_WATCH = new HashSet<>();
     static {
-        BROWSERS.add("com.android.chrome");
-        BROWSERS.add("com.chrome.beta");
-        BROWSERS.add("com.sec.android.app.sbrowser");
-        BROWSERS.add("org.mozilla.firefox");
-        BROWSERS.add("org.mozilla.focus");
-        BROWSERS.add("com.brave.browser");
-        BROWSERS.add("com.microsoft.emmx");
-        BROWSERS.add("com.opera.browser");
-        BROWSERS.add("com.opera.mini.native");
-        BROWSERS.add("com.UCMobile.intl");
-        BROWSERS.add("com.duckduckgo.mobile.android");
-        BROWSERS.add("com.mi.globalbrowser");
-        BROWSERS.add("com.vivo.browser");
-        BROWSERS.add("com.heytap.browser");
-        BROWSERS.add("com.kiwibrowser.browser");
-        BROWSERS.add("com.google.android.googlequicksearchbox");
+        ADULT_WATCH.add("com.android.chrome");
+        ADULT_WATCH.add("com.chrome.beta");
+        ADULT_WATCH.add("com.sec.android.app.sbrowser");
+        ADULT_WATCH.add("org.mozilla.firefox");
+        ADULT_WATCH.add("org.mozilla.focus");
+        ADULT_WATCH.add("com.brave.browser");
+        ADULT_WATCH.add("com.microsoft.emmx");
+        ADULT_WATCH.add("com.opera.browser");
+        ADULT_WATCH.add("com.opera.mini.native");
+        ADULT_WATCH.add("com.UCMobile.intl");
+        ADULT_WATCH.add("com.duckduckgo.mobile.android");
+        ADULT_WATCH.add("com.mi.globalbrowser");
+        ADULT_WATCH.add("com.vivo.browser");
+        ADULT_WATCH.add("com.heytap.browser");
+        ADULT_WATCH.add("com.kiwibrowser.browser");
+        ADULT_WATCH.add("com.google.android.googlequicksearchbox");
+        ADULT_WATCH.add(IG);
+        ADULT_WATCH.add(YT);
+        ADULT_WATCH.add(FB);
+        ADULT_WATCH.add(FB_LITE);
+        ADULT_WATCH.add("com.twitter.android");
+        ADULT_WATCH.add("com.reddit.frontpage");
+        ADULT_WATCH.add("org.telegram.messenger");
+        ADULT_WATCH.add("com.zhiliaoapp.musically");
+        ADULT_WATCH.add("com.snapchat.android");
+        ADULT_WATCH.add("com.pinterest");
+        ADULT_WATCH.add("com.tumblr");
+        ADULT_WATCH.add("com.vk.vkvideo");
+        ADULT_WATCH.add("in.mohalla.sharechat");
+        ADULT_WATCH.add("in.mohalla.video");
+        ADULT_WATCH.add("com.instagram.lite");
     }
 
     private static final int MAX_NODES = 1200;
@@ -70,7 +87,9 @@ public class BlockerService extends AccessibilityService {
         if (pkg.equals(getPackageName())) return;
 
         SharedPreferences p = Prefs.get(this);
-        boolean adultOn = p.getBoolean(Prefs.ADULT_ON, true);
+        // Adult blocking only runs in browsers and social media apps.
+        // Claude, Quran apps, WhatsApp and everything else are never touched.
+        boolean adultOn = p.getBoolean(Prefs.ADULT_ON, true) && ADULT_WATCH.contains(pkg);
 
         // Fast path: text the user is typing (search boxes, URL bars) in any app.
         if (adultOn && event.getEventType() == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED) {
@@ -91,12 +110,7 @@ public class BlockerService extends AccessibilityService {
         else if ((FB.equals(pkg) || FB_LITE.equals(pkg)) && p.getBoolean(Prefs.FB_ON, true))
             reelIds = FB_REEL_IDS;
 
-        boolean scanAdult = adultOn
-                && (BROWSERS.contains(pkg) || IG.equals(pkg) || YT.equals(pkg)
-                || FB.equals(pkg) || FB_LITE.equals(pkg)
-                || "com.twitter.android".equals(pkg) || "com.reddit.frontpage".equals(pkg)
-                || "org.telegram.messenger".equals(pkg) || "com.zhiliaoapp.musically".equals(pkg)
-                || "com.snapchat.android".equals(pkg) || "com.pinterest".equals(pkg));
+        boolean scanAdult = adultOn;
 
         if (reelIds == null && !scanAdult) return;
 
@@ -158,18 +172,32 @@ public class BlockerService extends AccessibilityService {
         lastBlock = now;
         performGlobalAction(GLOBAL_ACTION_BACK);
         Prefs.addBlock(this);
-        String what = YT.equals(pkg) ? "Shorts" : "Reels";
-        Toast.makeText(this, what + " blocked", Toast.LENGTH_SHORT).show();
+        showReminder(false);
     }
 
     private void blockAdult(String pkg, long now) {
         if (now - lastBlock < 1200) return;
         lastBlock = now;
-        // Back first (leaves the page), then Home (gets out of the app).
+        // Back leaves the page; the reminder screen then sends you Home.
         performGlobalAction(GLOBAL_ACTION_BACK);
-        main.postDelayed(() -> performGlobalAction(GLOBAL_ACTION_HOME), 250);
         Prefs.addAdultBlock(this);
-        Toast.makeText(this, "Adult content blocked", Toast.LENGTH_SHORT).show();
+        showReminder(true);
+    }
+
+    private void showReminder(boolean adult) {
+        main.postDelayed(() -> {
+            try {
+                Intent i = new Intent(this, BlockActivity.class);
+                i.putExtra(BlockActivity.EXTRA_ADULT, adult);
+                i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                        | Intent.FLAG_ACTIVITY_NO_ANIMATION);
+                startActivity(i);
+            } catch (Exception e) {
+                if (adult) performGlobalAction(GLOBAL_ACTION_HOME);
+                Toast.makeText(this, adult ? "Adult content blocked" : "Reels blocked",
+                        Toast.LENGTH_SHORT).show();
+            }
+        }, 150);
     }
 
     @Override
