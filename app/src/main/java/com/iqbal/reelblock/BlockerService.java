@@ -8,11 +8,15 @@ import android.os.Looper;
 import android.os.SystemClock;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
+import android.view.accessibility.AccessibilityWindowInfo;
 import android.widget.Toast;
 
 import java.util.ArrayDeque;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 public class BlockerService extends AccessibilityService {
@@ -74,83 +78,56 @@ public class BlockerService extends AccessibilityService {
         ADULT_WATCH.add("com.instagram.lite");
     }
 
-    // System screens where the app could be uninstalled, stopped or switched off.
-    static final Set<String> SYSTEM_PKGS = new HashSet<>();
-    static {
-        SYSTEM_PKGS.add("com.android.settings");
-        SYSTEM_PKGS.add("com.google.android.packageinstaller");
-        SYSTEM_PKGS.add("com.android.packageinstaller");
-        SYSTEM_PKGS.add("com.samsung.android.packageinstaller");
-        SYSTEM_PKGS.add("com.google.android.permissioncontroller");
-        SYSTEM_PKGS.add("com.android.permissioncontroller");
-        SYSTEM_PKGS.add("com.oplus.safecenter");
-        SYSTEM_PKGS.add("com.coloros.safecenter");
-        SYSTEM_PKGS.add("com.oplus.securitypermission");
-        SYSTEM_PKGS.add("com.miui.securitycenter");
-        SYSTEM_PKGS.add("com.samsung.android.lool");
-        SYSTEM_PKGS.add("com.google.android.apps.wellbeing");
-        SYSTEM_PKGS.add("com.android.vending");
-    }
-
-    // Home screen / app drawer apps (long-press → Uninstall).
-    static final Set<String> LAUNCHERS = new HashSet<>();
-    static {
-        LAUNCHERS.add("com.android.launcher");
-        LAUNCHERS.add("com.android.launcher3");
-        LAUNCHERS.add("net.oneplus.launcher");
-        LAUNCHERS.add("com.oppo.launcher");
-        LAUNCHERS.add("com.oplus.launcher");
-        LAUNCHERS.add("com.sec.android.app.launcher");
-        LAUNCHERS.add("com.miui.home");
-        LAUNCHERS.add("com.mi.android.globallauncher");
-        LAUNCHERS.add("com.google.android.apps.nexuslauncher");
-        LAUNCHERS.add("com.vivo.launcher");
-        LAUNCHERS.add("com.bbk.launcher2");
-        LAUNCHERS.add("com.realme.launcher");
-        LAUNCHERS.add("com.teslacoilsw.launcher");
-        LAUNCHERS.add("app.lawnchair");
-        LAUNCHERS.add("com.microsoft.launcher");
-    }
-
-    // Words that mean someone is trying to remove or disable the app.
-    private static final String[] TAMPER_WORDS = {
-            "uninstall", "force stop", "deactivate", "use reel blocker", "stop reel blocker",
-            "turn off reel blocker", "clear data", "clear storage", "disable",
-            "blocks instagram reels"
-    };
-
     private static final int MAX_NODES = 1200;
+    private static final int MAX_GUARD_NODES = 800;
+
+    // Loop protection: if one (non-Settings) app trips the guard this often,
+    // stop guarding that app for a while so the phone can never get stuck.
+    private static final int LOOP_HITS = 3;
+    private static final long LOOP_WINDOW_MS = 60_000;
+    private static final long LOOP_PAUSE_MS = 10 * 60_000;
 
     private final Handler main = new Handler(Looper.getMainLooper());
     private long lastCheck = 0;
     private long lastBlock = 0;
+    private long lastGuardSettings = 0;
+    private long lastGuardOther = 0;
+    private long lastTamper = 0;
+    private final Map<String, ArrayDeque<Long>> tamperHits = new HashMap<>();
+    private final Map<String, Long> pausedUntil = new HashMap<>();
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
+        try {
+            handle(event);
+        } catch (Exception ignored) {
+            // Never let one bad screen crash the blocker.
+        }
+    }
+
+    private void handle(AccessibilityEvent event) {
         if (event == null || event.getPackageName() == null) return;
         String pkg = event.getPackageName().toString();
         if (pkg.equals(getPackageName())) return;
 
-        // Uninstall protection: watches every app (Settings, launcher, app search,
-        // OnePlus/Samsung/Xiaomi pop-ups...) for screens that would remove this app.
-        if (Prefs.isProtected(this) && !Prefs.isUnlocked(this)
-                && !"com.anthropic.claude".equals(pkg)) {
-            if (guardAny(event, pkg)) return;
+        // ---- Uninstall protection ----
+        if (Prefs.isProtected(this) && !Prefs.isUnlocked(this)) {
+            if (guard(event, pkg)) return;
         }
-        if (SYSTEM_PKGS.contains(pkg)) return;
+        if (TamperRules.isSettingsLike(pkg)) return;
 
+        // ---- Reels / Shorts and adult content ----
         SharedPreferences p = Prefs.get(this);
         // Adult blocking only runs in browsers and social media apps.
-        // Claude, Quran apps, WhatsApp and everything else are never touched.
         boolean adultOn = p.getBoolean(Prefs.ADULT_ON, true) && ADULT_WATCH.contains(pkg);
 
-        // Fast path: text the user is typing (search boxes, URL bars) in any app.
+        // Fast path: text being typed in a search box / URL bar.
         if (adultOn && event.getEventType() == AccessibilityEvent.TYPE_VIEW_TEXT_CHANGED) {
             List<CharSequence> texts = event.getText();
             if (texts != null) {
                 for (CharSequence t : texts) {
                     if (AdultFilter.isAdult(t)) {
-                        blockAdult(pkg, SystemClock.elapsedRealtime());
+                        blockAdult(SystemClock.elapsedRealtime());
                         return;
                     }
                 }
@@ -163,9 +140,7 @@ public class BlockerService extends AccessibilityService {
         else if ((FB.equals(pkg) || FB_LITE.equals(pkg)) && p.getBoolean(Prefs.FB_ON, true))
             reelIds = FB_REEL_IDS;
 
-        boolean scanAdult = adultOn;
-
-        if (reelIds == null && !scanAdult) return;
+        if (reelIds == null && !adultOn) return;
 
         // Events fire constantly; check at most ~3 times a second.
         long now = SystemClock.elapsedRealtime();
@@ -178,161 +153,88 @@ public class BlockerService extends AccessibilityService {
                 || !pkg.equals(root.getPackageName().toString())) return;
 
         if (reelIds != null && hasVisible(root, pkg, reelIds)) {
-            blockReel(pkg, now);
+            blockReel(now);
             return;
         }
-        if (scanAdult && screenIsAdult(root)) {
-            blockAdult(pkg, now);
+        if (adultOn && screenIsAdult(root)) {
+            blockAdult(now);
         }
     }
 
-    private boolean hasVisible(AccessibilityNodeInfo root, String pkg, String[] ids) {
-        for (String id : ids) {
-            List<AccessibilityNodeInfo> nodes =
-                    root.findAccessibilityNodeInfosByViewId(pkg + ":id/" + id);
-            if (nodes == null) continue;
-            for (AccessibilityNodeInfo n : nodes) {
-                if (n != null && n.isVisibleToUser()) return true;
-            }
-        }
-        return false;
-    }
+    // ===================== Uninstall protection =====================
 
-    /** Reads visible text on screen (URL bar, titles, captions, web page text). */
-    private boolean screenIsAdult(AccessibilityNodeInfo root) {
-        ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
-        queue.add(root);
-        int seen = 0;
-        while (!queue.isEmpty() && seen < MAX_NODES) {
-            AccessibilityNodeInfo n = queue.poll();
-            if (n == null) continue;
-            seen++;
-            if (AdultFilter.isAdult(n.getText())
-                    || AdultFilter.isAdult(n.getContentDescription())) {
-                return true;
-            }
-            int c = n.getChildCount();
-            for (int i = 0; i < c; i++) {
-                AccessibilityNodeInfo child = n.getChild(i);
-                if (child != null) queue.add(child);
-            }
-        }
-        return false;
-    }
-
-    private long lastGuardCheck = 0;
-
-    /** Returns true if it blocked a tamper attempt. */
-    private boolean guardAny(AccessibilityEvent event, String pkg) {
+    /** Checks each on-screen window separately. Returns true if it blocked something. */
+    private boolean guard(AccessibilityEvent event, String pkg) {
         int type = event.getEventType();
-        if (type == AccessibilityEvent.TYPE_VIEW_SCROLLED) return false;
-        long now = SystemClock.elapsedRealtime();
-        if (type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && now - lastGuardCheck < 300)
-            return false;
-        lastGuardCheck = now;
+        if (type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                && type != AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) return false;
 
-        StringBuilder sb = new StringBuilder();
-        if (event.getText() != null) for (CharSequence t : event.getText()) sb.append(t).append(' ');
-        if (event.getContentDescription() != null) sb.append(event.getContentDescription()).append(' ');
-        // Read every window on screen (pop-ups are often separate windows).
+        long now = SystemClock.elapsedRealtime();
+        boolean settingsEvent = TamperRules.isSettingsLike(pkg);
+        if (type == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED) {
+            // Content changes are frequent: Settings every 350 ms, other apps every 700 ms.
+            if (settingsEvent) {
+                if (now - lastGuardSettings < 350) return false;
+                lastGuardSettings = now;
+            } else {
+                if (now - lastGuardOther < 700) return false;
+                lastGuardOther = now;
+            }
+        }
+
+        List<AccessibilityWindowInfo> wins = null;
         try {
-            List<android.view.accessibility.AccessibilityWindowInfo> wins = getWindows();
-            if (wins != null) {
-                for (android.view.accessibility.AccessibilityWindowInfo w : wins) {
-                    if (w.getType() == android.view.accessibility.AccessibilityWindowInfo.TYPE_SYSTEM
-                            && w.getRoot() == null) continue;
-                    AccessibilityNodeInfo r = w.getRoot();
-                    if (r != null) sb.append(collectText(r)).append(' ');
-                }
-            }
+            wins = getWindows();
         } catch (Exception ignored) { }
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root != null) sb.append(collectText(root));
-        String text = sb.toString().toLowerCase(java.util.Locale.ROOT);
 
-        if (!text.contains("reel blocker") && !text.contains("blocks instagram reels")) return false;
-
-        boolean tamper = false;
-        if (SYSTEM_PKGS.contains(pkg)) {
-            for (String w : TAMPER_WORDS) if (text.contains(w)) { tamper = true; break; }
-        } else if (text.contains("uninstall")) {
-            // Launcher / app search: the confirm pop-up or the long-press menu.
-            tamper = text.contains("cancel") || text.contains("app info")
-                    || text.contains("want to uninstall") || text.contains("delete its data");
+        if (wins == null || wins.isEmpty()) {
+            return checkWindow(getRootInActiveWindow(), now);
         }
-        if (tamper) blockTamper(now);
-        return tamper;
+        for (AccessibilityWindowInfo w : wins) {
+            int wt = w.getType();
+            if (wt == AccessibilityWindowInfo.TYPE_INPUT_METHOD
+                    || wt == AccessibilityWindowInfo.TYPE_ACCESSIBILITY_OVERLAY) continue;
+            if (checkWindow(w.getRoot(), now)) return true;
+        }
+        return false;
     }
 
-    private void guardSystemScreen(AccessibilityEvent event, String pkg) {
-        long now = SystemClock.elapsedRealtime();
-        if (event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
-                && now - lastGuardCheck < 300) return;
-        lastGuardCheck = now;
+    private boolean checkWindow(AccessibilityNodeInfo root, long now) {
+        if (root == null || root.getPackageName() == null) return false;
+        String wp = root.getPackageName().toString();
+        if (TamperRules.NEVER_GUARD.contains(wp) || wp.equals(getPackageName())) return false;
+        Long until = pausedUntil.get(wp);
+        if (until != null && now < until) return false;
 
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root == null || root.getPackageName() == null
-                || !pkg.equals(root.getPackageName().toString())) return;
+        String text = visibleText(root, MAX_GUARD_NODES);
+        boolean settingsLike = TamperRules.isSettingsLike(wp);
+        if (!TamperRules.isTamper(text, settingsLike)) return false;
 
-        String text = collectText(root);
-        if (!text.contains("reel blocker") && !text.contains("blocks instagram reels")) return;
-        for (String w : TAMPER_WORDS) {
-            if (text.contains(w)) {
-                blockTamper(now);
-                return;
-            }
-        }
+        if (!settingsLike && tripsLoopProtection(wp, now)) return false;
+        blockTamper(now);
+        return true;
     }
 
-    /** Catches the home screen's own "Uninstall Reel Blocker?" pop-up and its long-press menu. */
-    private void guardLauncher(AccessibilityEvent event) {
-        long now = SystemClock.elapsedRealtime();
-        int type = event.getEventType();
-        if (type != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED && now - lastGuardCheck < 250)
-            return;
-        lastGuardCheck = now;
-
-        // Event text often carries the pop-up title directly.
-        StringBuilder sb = new StringBuilder();
-        if (event.getText() != null) for (CharSequence t : event.getText()) sb.append(t).append(' ');
-        if (event.getContentDescription() != null) sb.append(event.getContentDescription());
-        String evText = sb.toString().toLowerCase(java.util.Locale.ROOT);
-
-        String text = evText;
-        AccessibilityNodeInfo root = getRootInActiveWindow();
-        if (root != null) text = text + " " + collectText(root);
-
-        if (!text.contains("reel blocker") || !text.contains("uninstall")) return;
-        // Only the confirmation pop-up or the long-press menu, not the plain home screen.
-        boolean confirmDialog = text.contains("cancel") || text.contains("uninstall reel blocker")
-                || text.contains("want to uninstall");
-        boolean shortcutMenu = text.contains("app info") || text.contains("widgets");
-        if (confirmDialog || shortcutMenu) blockTamper(now);
-    }
-
-    private String collectText(AccessibilityNodeInfo root) {
-        StringBuilder sb = new StringBuilder();
-        ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
-        queue.add(root);
-        int seen = 0;
-        while (!queue.isEmpty() && seen < MAX_NODES) {
-            AccessibilityNodeInfo n = queue.poll();
-            if (n == null) continue;
-            seen++;
-            if (n.getText() != null) sb.append(n.getText()).append(' ');
-            if (n.getContentDescription() != null) sb.append(n.getContentDescription()).append(' ');
-            int c = n.getChildCount();
-            for (int i = 0; i < c; i++) {
-                AccessibilityNodeInfo child = n.getChild(i);
-                if (child != null) queue.add(child);
-            }
+    /** Records a hit; returns true (and pauses that app) if it looks like a loop. */
+    private boolean tripsLoopProtection(String wp, long now) {
+        ArrayDeque<Long> hits = tamperHits.get(wp);
+        if (hits == null) {
+            hits = new ArrayDeque<>();
+            tamperHits.put(wp, hits);
         }
-        return sb.toString().toLowerCase(java.util.Locale.ROOT);
+        while (!hits.isEmpty() && now - hits.peekFirst() > LOOP_WINDOW_MS) hits.pollFirst();
+        hits.addLast(now);
+        if (hits.size() > LOOP_HITS) {
+            pausedUntil.put(wp, now + LOOP_PAUSE_MS);
+            hits.clear();
+            return true;
+        }
+        return false;
     }
 
     private void blockTamper(long now) {
-        if (now - lastBlock < 1000) return;
-        lastBlock = now;
+        if (now - lastTamper < 1000) return;
+        lastTamper = now;
         performGlobalAction(GLOBAL_ACTION_BACK);
         main.postDelayed(() -> {
             performGlobalAction(GLOBAL_ACTION_HOME);
@@ -347,7 +249,68 @@ public class BlockerService extends AccessibilityService {
         }, 200);
     }
 
-    private void blockReel(String pkg, long now) {
+    // ===================== Screen reading =====================
+
+    /** Text of nodes the user can actually see. Hidden views are ignored. */
+    private String visibleText(AccessibilityNodeInfo root, int maxNodes) {
+        StringBuilder sb = new StringBuilder();
+        ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
+        queue.add(root);
+        int seen = 0;
+        while (!queue.isEmpty() && seen < maxNodes) {
+            AccessibilityNodeInfo n = queue.poll();
+            if (n == null) continue;
+            seen++;
+            if (!n.isVisibleToUser()) continue; // skip hidden views and everything inside them
+            if (n.getText() != null) sb.append(n.getText()).append(' ');
+            if (n.getContentDescription() != null) sb.append(n.getContentDescription()).append(' ');
+            int c = n.getChildCount();
+            for (int i = 0; i < c; i++) {
+                AccessibilityNodeInfo child = n.getChild(i);
+                if (child != null) queue.add(child);
+            }
+        }
+        return sb.toString().toLowerCase(Locale.ROOT);
+    }
+
+    private boolean hasVisible(AccessibilityNodeInfo root, String pkg, String[] ids) {
+        for (String id : ids) {
+            List<AccessibilityNodeInfo> nodes =
+                    root.findAccessibilityNodeInfosByViewId(pkg + ":id/" + id);
+            if (nodes == null) continue;
+            for (AccessibilityNodeInfo n : nodes) {
+                if (n != null && n.isVisibleToUser()) return true;
+            }
+        }
+        return false;
+    }
+
+    /** Visible text only (URL bar, titles, captions, web page text). */
+    private boolean screenIsAdult(AccessibilityNodeInfo root) {
+        ArrayDeque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
+        queue.add(root);
+        int seen = 0;
+        while (!queue.isEmpty() && seen < MAX_NODES) {
+            AccessibilityNodeInfo n = queue.poll();
+            if (n == null) continue;
+            seen++;
+            if (!n.isVisibleToUser()) continue;
+            if (AdultFilter.isAdult(n.getText())
+                    || AdultFilter.isAdult(n.getContentDescription())) {
+                return true;
+            }
+            int c = n.getChildCount();
+            for (int i = 0; i < c; i++) {
+                AccessibilityNodeInfo child = n.getChild(i);
+                if (child != null) queue.add(child);
+            }
+        }
+        return false;
+    }
+
+    // ===================== Blocking actions =====================
+
+    private void blockReel(long now) {
         if (now - lastBlock < 800) return; // avoid double Back
         lastBlock = now;
         performGlobalAction(GLOBAL_ACTION_BACK);
@@ -355,7 +318,7 @@ public class BlockerService extends AccessibilityService {
         showReminder(false);
     }
 
-    private void blockAdult(String pkg, long now) {
+    private void blockAdult(long now) {
         if (now - lastBlock < 1200) return;
         lastBlock = now;
         // Back leaves the page; the reminder screen then sends you Home.
